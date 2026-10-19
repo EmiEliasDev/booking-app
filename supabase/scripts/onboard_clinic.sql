@@ -1,4 +1,6 @@
 -- Onboard a new clinic. LIVE: paste this whole file into Supabase SQL Editor and Run.
+-- IMPORTANT: click inside the editor and select NOTHING before clicking Run. If any text is highlighted,
+-- the SQL Editor runs only that selection, and a partial run can skip steps or the post-check.
 -- Before running: Dashboard > Authentication > Add user (auto-confirm) for the admin email
 -- (and for any front desk email). This script only READS auth.users; it never creates users.
 -- What it does, in ONE statement (all or nothing): validates the parameters, creates the clinic,

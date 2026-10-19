@@ -1,5 +1,7 @@
 -- Offboard (roll back) a FRESHLY onboarded clinic. DESTRUCTIVE. LIVE: paste this whole file into
 -- Supabase SQL Editor and Run.
+-- IMPORTANT: click inside the editor and select NOTHING before clicking Run. If any text is highlighted,
+-- the SQL Editor runs only that selection, and a partial run can skip steps or the post-check.
 -- Flow: run onboard_clinic.sql -> copy CLINIC_ID from its post-check -> paste it below as clinic_id
 -- (and the same slug) -> Run. clinic_id is REQUIRED and must belong to the slug; otherwise it refuses
 -- with SQLSTATE 22023 and deletes nothing. As shipped, clinic_id is a placeholder, so running this file
