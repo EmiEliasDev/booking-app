@@ -2,12 +2,13 @@
 -- Runs the ACTUAL script files with psql \ir (path relative to this file), so their example
 -- parameters ("Tu Clínica", basico, admin@tuclinica.example, 2 login-less therapists) are the happy-path
 -- fixture; the session helpers they define (pg_temp.onboard_clinic / offboard_clinic and the *_report
--- functions) are then called with edited parameters for the failure cases. Fake data only. pgTAP, rolls back.
+-- functions) are then called with edited parameters for the failure cases. The shipped offboard file has
+-- a placeholder clinic_id and must refuse; the happy-path offboard passes the onboarded CLINIC_ID. Fake data only. pgTAP, rolls back.
 -- Locally: psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/onboard_clinic_test.sql
 -- Note: needs psql \ir access to ../scripts (the d3harness run.sh does this). `supabase test db` only
 -- ships supabase/tests to its runner, so this file is meant for the harness / psql.
 begin;
-select plan(54);
+select plan(65);
 
 -- ============ fixtures (service role) ============
 -- Auth users exist before onboarding (Dashboard > Authentication > Add user on live).
@@ -109,29 +110,52 @@ select results_eq($$select h.weekday::int, h.start_time, h.end_time from public.
   $$values (1, '09:00'::time, '14:00'::time), (3, '15:00'::time, '19:00'::time)$$, 'K3 per-therapist hours override the default');
 select ok((select bool_and(ok) from pg_temp.onboard_report('clinica-seis')), 'K4 post-check all ok for clinica-seis');
 
--- ============ [X] offboard Tu Clínica: the script file as shipped ============
+-- ============ [X] offboard: the script file as shipped, then with the real CLINIC_ID ============
+create temp view t_counts as select format('%s/%s/%s/%s/%s', (select count(*) from public.clinics), (select count(*) from public.staff),
+  (select count(*) from public.staff_hours), (select count(*) from public.staff_time_off), (select count(*) from public.appointments)) as c;
+select set_config('t.counts', (select c from t_counts), true);
+-- The shipped file has a placeholder clinic_id, so it must refuse. psql rolls back only the failing
+-- statement (ON_ERROR_ROLLBACK), keeping the session functions the file defined, and records its SQLSTATE.
+\set ON_ERROR_STOP 0
+\set ON_ERROR_ROLLBACK on
 \ir ../scripts/offboard_clinic.sql
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP 1
+select is(:'LAST_ERROR_SQLSTATE'::text, '22023'::text, 'X1 shipped offboard file (placeholder clinic_id) refuses with 22023');
+select is((select c from t_counts), current_setting('t.counts'), 'X2 ... and deletes nothing');
+select throws_ok($$select pg_temp.offboard_clinic('{"slug":"tu-clinica"}')$$, '22023', null, 'X3 missing clinic_id rejected (22023)');
+select is((select c from t_counts), current_setting('t.counts'), 'X4 ... nothing deleted');
+select throws_ok($$select pg_temp.offboard_clinic('{"slug":"tu-clinica","clinic_id":""}')$$, '22023', null, 'X5 empty clinic_id rejected (22023)');
+select is((select c from t_counts), current_setting('t.counts'), 'X6 ... nothing deleted');
+select throws_ok($$select pg_temp.offboard_clinic('{"slug":"tu-clinica","clinic_id":null}')$$, '22023', null, 'X7 null clinic_id rejected (22023)');
+select is((select c from t_counts), current_setting('t.counts'), 'X8 ... nothing deleted');
+select throws_ok($$select pg_temp.offboard_clinic('{"slug":"tu-clinica","clinic_id":"not-a-uuid"}')$$, '22023', null, 'X9 non-uuid clinic_id rejected (22023)');
+select is((select c from t_counts), current_setting('t.counts'), 'X10 ... nothing deleted');
+select throws_ok($$select pg_temp.offboard_clinic('{"slug":"tu-clinica","clinic_id":"f7000000-0000-4000-8000-00000000000c"}')$$, '22023', null, 'X11 clinic_id of another clinic (mismatch) rejected (22023)');
+select is((select c from t_counts), current_setting('t.counts'), 'X12 ... nothing deleted');
+select throws_ok($$select pg_temp.offboard_clinic('{"slug":"no-existe","clinic_id":"00000000-0000-4000-8000-000000000000"}')$$, 'P0002', null, 'X13 unknown slug rejected');
+-- the person's edit: paste CLINIC_ID from the onboarding post-check into the params
+select set_config('t.offboard', (current_setting('offboard.params')::jsonb || jsonb_build_object('clinic_id', current_setting('t.c')))::text, true);
+select ok((select bool_and(ok) from pg_temp.offboard_clinic(current_setting('t.offboard')::jsonb)), 'X14 offboard with the real CLINIC_ID: post-check every ok is true');
 select results_eq(format($$select (select count(*) from public.clinics where id = %1$L)::int, (select count(*) from public.staff where clinic_id = %1$L)::int,
                                   (select count(*) from public.staff_hours where clinic_id = %1$L)::int, (select count(*) from public.staff_time_off where clinic_id = %1$L)::int$$, current_setting('t.c')),
-  $$values (0, 0, 0, 0)$$, 'X1 Tu Clínica fully removed (clinic, staff, hours, time off)');
-select ok((select bool_and(ok) from pg_temp.offboard_report(current_setting('t.c')::uuid, 'tu-clinica', current_setting('offboard.auth_users'))), 'X2 offboard post-check: every ok is true');
-select is((select count(*)::int from auth.users where id = 'f6000000-0000-4000-8000-000000000001'), 1, 'X3 admin Auth user kept');
+  $$values (0, 0, 0, 0)$$, 'X15 Tu Clínica fully removed (clinic, staff, hours, time off)');
+select is((select count(*)::int from auth.users where id = 'f6000000-0000-4000-8000-000000000001'), 1, 'X16 admin Auth user kept');
 select results_eq($$select (select count(*) from public.staff where clinic_id = 'f7000000-0000-4000-8000-00000000000c')::int,
                           (select count(*) from public.staff_hours where clinic_id = 'f7000000-0000-4000-8000-00000000000c')::int,
                           (select count(*) from public.staff_time_off where clinic_id = 'f7000000-0000-4000-8000-00000000000c')::int,
                           (select count(*) from public.staff where clinic_id = (select id from public.clinics where slug = 'clinica-seis'))::int$$,
-  $$values (2, 1, 1, 6)$$, 'X4 other clinics untouched');
+  $$values (2, 1, 1, 6)$$, 'X17 other clinics untouched');
 -- clinica-seis gets a booking -> offboard must refuse
 select lives_ok($$select public.request_appointment(c.id, (select id from public.list_therapists(c.id) where display_name = 'T2'),
     (select min(slot_date) from public.get_available_slots(c.id, (select id from public.list_therapists(c.id) where display_name = 'T2'), current_date + 1, current_date + 8)),
     (select min(slot_time) from public.get_available_slots(c.id, (select id from public.list_therapists(c.id) where display_name = 'T2'), current_date + 1, current_date + 8)
        where slot_date = (select min(slot_date) from public.get_available_slots(c.id, (select id from public.list_therapists(c.id) where display_name = 'T2'), current_date + 1, current_date + 8))),
-    'Paciente Prueba', 'paciente@ejemplo.com', '', 'initial') from public.clinics c where c.slug = 'clinica-seis'$$, 'X5 guest books at clinica-seis');
-select throws_ok($$select pg_temp.offboard_clinic('{"slug":"clinica-seis"}')$$, '55000', null, 'X6 offboard refuses a clinic with appointments');
-select is((select count(*)::int from public.staff s join public.clinics c on c.id = s.clinic_id where c.slug = 'clinica-seis'), 6, 'X7 refused offboard changed nothing');
-select throws_ok($$select pg_temp.offboard_clinic('{"slug":"no-existe"}')$$, 'P0002', null, 'X8 offboard of an unknown slug rejected');
-select throws_ok($$select pg_temp.offboard_clinic('{"slug":"otra","clinic_id":"00000000-0000-4000-8000-000000000000"}')$$, '22023', null, 'X9 offboard refuses when clinic_id does not match the slug');
-select lives_ok($$select pg_temp.onboard_clinic(current_setting('onboard.params')::jsonb)$$, 'X10 after offboarding, onboarding Tu Clínica again works (slug and admin free)');
+    'Paciente Prueba', 'paciente@ejemplo.com', '', 'initial') from public.clinics c where c.slug = 'clinica-seis'$$, 'X18 guest books at clinica-seis');
+select throws_ok(format($$select pg_temp.offboard_clinic('{"slug":"clinica-seis","clinic_id":"%s"}')$$, (select id from public.clinics where slug = 'clinica-seis')),
+  '55000', null, 'X19 offboard refuses a clinic with appointments (even with the right clinic_id)');
+select is((select count(*)::int from public.staff s join public.clinics c on c.id = s.clinic_id where c.slug = 'clinica-seis'), 6, 'X20 refused offboard changed nothing');
+select lives_ok($$select pg_temp.onboard_clinic(current_setting('onboard.params')::jsonb)$$, 'X21 after offboarding, onboarding Tu Clínica again works (slug and admin free)');
 
 select * from finish();
 rollback;
