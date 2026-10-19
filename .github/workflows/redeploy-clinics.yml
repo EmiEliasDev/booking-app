@@ -1,0 +1,58 @@
+# Redeploys every clinic site when booking-app `main` changes, by starting
+# each clinic repo's own Deploy workflow (workflow_dispatch). The clinic repo
+# still owns its build and Pages deploy; this only presses "Run workflow".
+#
+# One-time setup in booking-app (Settings → Secrets and variables → Actions):
+#   secret   CLINIC_DEPLOY_TOKEN   fine-grained PAT, owner EmiEliasDev, access to the
+#                                  clinic deploy repos only, permission
+#                                  Actions: Read and write (nothing else)
+#   variable CLINIC_DEPLOY_REPOS   clinic repos, one per line or space-separated,
+#                                  e.g. EmiEliasDev/rehabireb-web
+# New clinic: add its repo to CLINIC_DEPLOY_REPOS and to the token's repo list.
+
+name: Redeploy clinics
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: redeploy-clinics
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start each clinic's Deploy workflow
+        env:
+          GH_TOKEN: ${{ secrets.CLINIC_DEPLOY_TOKEN }}
+          REPOS: ${{ vars.CLINIC_DEPLOY_REPOS }}
+        run: |
+          if [ -z "$REPOS" ]; then
+            echo "::notice::CLINIC_DEPLOY_REPOS is empty; nothing to redeploy."
+            exit 0
+          fi
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::CLINIC_DEPLOY_TOKEN secret is missing." >&2
+            exit 1
+          fi
+          failed=0
+          for repo in $REPOS; do
+            if ! [[ "$repo" =~ ^EmiEliasDev/[A-Za-z0-9._-]+$ ]]; then
+              echo "::error::Skipping invalid repo name: $repo" >&2
+              failed=1
+              continue
+            fi
+            if gh workflow run deploy.yml -R "$repo" --ref main; then
+              echo "Started Deploy in $repo"
+            else
+              echo "::error::Could not start Deploy in $repo" >&2
+              failed=1
+            fi
+          done
+          exit $failed
